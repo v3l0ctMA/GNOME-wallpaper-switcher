@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.wallpaper-switcher"
+          path="/org/gnome/shell/extensions/wallpaper-switcher/">
+
+    <key name="wallpaper-folder" type="s">
+      <default>''</default>
+      <summary>Wallpaper folder</summary>
+      <description>Path to the folder containing wallpaper images.</description>
+    </key>
+
+    <key name="include-subfolders" type="b">
+      <default>false</default>
+      <summary>Include subfolders</summary>
+      <description>Scan subfolders of the wallpaper folder recursively.</description>
+    </key>
+
+    <key name="panel-position" type="s">
+      <default>'right'</default>
+      <summary>Panel position</summary>
+      <description>Which box to place the icon in: left, center, or right.</description>
+    </key>
+
+    <key name="picture-options" type="s">
+      <default>'zoom'</default>
+      <summary>Picture scaling mode</summary>
+      <description>How to scale the wallpaper: zoom, scaled, stretched, centered, or wallpaper.</description>
+    </key>
+
+    <key name="auto-rotate" type="b">
+      <default>false</default>
+      <summary>Auto-rotate</summary>
+      <description>Automatically change wallpaper on a timer.</description>
+    </key>
+
+    <key name="rotate-interval" type="i">
+      <default>10</default>
+      <summary>Rotate interval (minutes)</summary>
+      <description>How often to change the wallpaper when auto-rotate is on.</description>
+    </key>
+
+
+    <key name="random-hotkey" type="as">
+      <default>['&lt;Super&gt;&lt;Alt&gt;w']</default>
+      <summary>Random wallpaper hotkey</summary>
+      <description>Global hotkey to apply a random wallpaper instantly without opening the carousel.</description>
+    </key>
+
+  </schema>
+</schemalist>

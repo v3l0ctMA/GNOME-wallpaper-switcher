@@ -1,0 +1,8 @@
+{
+  "name": "Wallpaper Switcher",
+  "description": "Quickly switch wallpapers from a watched folder via a panel card carousel.",
+  "uuid": "wallpaper-switcher@local",
+  "version": 1,
+  "shell-version": ["45", "46", "47", "48", "49", "50"],
+  "url": ""
+}
