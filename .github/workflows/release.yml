@@ -1,10 +1,14 @@
+cd ~/.local/share/gnome-shell/extensions/wallpaper-switcher@local
+cat > .github/workflows/release.yml << 'EOF'
 name: Release
 
-# Runs automatically when you push a version tag like v1.0, v1.1, etc.
 on:
   push:
     tags:
       - 'v*'
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -44,3 +48,4 @@ jobs:
             4. Log out and back in (Wayland) or `Alt+F2` → `r` (X11)
 
             See README.md for full instructions.
+EOF
