@@ -15,15 +15,28 @@ const SCHEMA_ID  = 'org.gnome.shell.extensions.wallpaper-switcher';
 const BG_SCHEMA  = 'org.gnome.desktop.background';
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff', '.tif']);
 
-const CARD_W     = 180;
-const CARD_H     = 112;
-const SIDE_SCALE = 0.75;
-const SIDE_W     = Math.round(CARD_W * SIDE_SCALE);
-const SIDE_H     = Math.round(CARD_H * SIDE_SCALE);
-const GAP        = 10;
-const PEEK       = 1;
-const POPUP_PAD  = 16;
-const POPUP_W    = POPUP_PAD * 2 + CARD_W + PEEK * 2 * (SIDE_W + GAP);
+// Grid dimensions
+const GRID_COLS    = 3;
+const GRID_THUMB_W = 174;
+const GRID_THUMB_H = 107;
+const GRID_GAP     = 10;
+const GRID_LABEL_H = 26;
+const GRID_ROWS    = 3;
+const POPUP_PAD    = 12;
+
+// Derived sizes
+const CONTENT_W  = GRID_COLS * GRID_THUMB_W + (GRID_COLS - 1) * GRID_GAP;
+const GRID_H     = GRID_ROWS * (GRID_THUMB_H + GRID_LABEL_H) + (GRID_ROWS - 1) * GRID_GAP;
+const HINT_H     = 20;
+const CONTENT_H  = GRID_H + HINT_H;
+const POPUP_W    = CONTENT_W + POPUP_PAD * 2;
+const BTNBAR_H   = 34;
+const POPUP_H    = CONTENT_H + BTNBAR_H + POPUP_PAD * 2 + 8;
+
+// Carousel: thumb fills content minus label row
+const CAR_W      = CONTENT_W;
+const CAR_LABEL_H = 28;
+const CAR_H      = CONTENT_H - CAR_LABEL_H - 6;
 
 const INTERVAL_MINS = [1, 5, 10, 15, 30, 60];
 
@@ -71,324 +84,543 @@ function setWallpaper(path, pictureOptions) {
     bg.apply();
 }
 
-function makeThumbStyle(w, h, path) {
-    const escaped = path.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-    return `
-        width: ${w}px; height: ${h}px; border-radius: 7px;
-        background-image: url('${escaped}');
-        background-size: cover; background-position: center;
-    `;
+function thumbStyle(w, h, path) {
+    const esc = path.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    return `width:${w}px;height:${h}px;border-radius:6px;background-image:url('${esc}');background-size:cover;background-position:center;`;
 }
 
-function randomOther(files, currentPath) {
+function randomOther(files, cur) {
     if (files.length <= 1) return files[0] ?? null;
-    let pick;
-    do { pick = files[Math.floor(Math.random() * files.length)]; }
-    while (pick === currentPath);
-    return pick;
+    let p;
+    do { p = files[Math.floor(Math.random() * files.length)]; } while (p === cur);
+    return p;
 }
 
-function intervalLabel(mins) {
-    return mins === 60 ? '1 hr' : `${mins} min`;
+function baseName(path) {
+    return GLib.path_get_basename(path).replace(/\.[^.]+$/, '');
 }
 
-// ─── CardCarousel ─────────────────────────────────────────────────────────────
+function intervalLabel(m) { return m === 60 ? '1 hr' : `${m} min`; }
 
-class CardCarousel {
-    constructor(files, currentPath, settings, onPreview, onConfirm, onSkip) {
+function renameFile(oldPath, newName) {
+    try {
+        const file = Gio.File.new_for_path(oldPath);
+        const ext  = GLib.path_get_basename(oldPath).replace(/^[^.]+/, '');
+        return file.set_display_name(newName + ext, null).get_path();
+    } catch (_) { return null; }
+}
+
+// ─── inline rename helper ─────────────────────────────────────────────────────
+
+function startRename(parentActor, labelBtn, currentName, x, y, w, h, onCommit) {
+    labelBtn.hide();
+    const entry = new St.Entry({
+        text:  currentName,
+        style: `width:${w}px;height:${h}px;font-size:10px;border-radius:4px;padding:2px 4px;`,
+    });
+    entry.set_position(x, y);
+    parentActor.add_child(entry);
+    entry.grab_key_focus();
+    entry.get_clutter_text().set_selection(0, -1);
+
+    const commit = () => {
+        const n = entry.get_text().trim();
+        entry.destroy();
+        labelBtn.show();
+        if (n) onCommit(n);
+    };
+    entry.get_clutter_text().connect('activate', commit);
+    entry.connect('key-press-event', (_a, ev) => {
+        if (ev.get_key_symbol() === Clutter.KEY_Escape) {
+            entry.destroy();
+            labelBtn.show();
+            return Clutter.EVENT_STOP;
+        }
+        return Clutter.EVENT_PROPAGATE;
+    });
+}
+
+// ─── BottomBar ────────────────────────────────────────────────────────────────
+
+class BottomBar {
+    constructor(settings, viewMode, onRandom, onSettings, onViewToggle) {
+        this._settings = settings;
+        this._onSkip   = null;
+
+        this.actor = new St.BoxLayout({
+            vertical: false,
+            style:    `width:${CONTENT_W}px; padding-top:6px;`,
+        });
+
+        // ── left ──────────────────────────────────────────────────────────────
+        this._leftBox = new St.BoxLayout({ vertical: false, style: 'spacing:6px;', x_expand: true });
+        this.actor.add_child(this._leftBox);
+
+        // One-shot random button
+        const randBtn = new St.Button({
+            child:  new St.Icon({ icon_name: 'media-skip-forward-symbolic', icon_size: 13 }),
+            style:  'padding:3px 6px;border-radius:6px;background-color:rgba(255,255,255,0.1);',
+            reactive: true,
+        });
+        randBtn.connect('clicked', () => onRandom());
+        this._leftBox.add_child(randBtn);
+
+        // Nav hint (shown in carousel mode, hidden in grid)
+        this._navHint = new St.Label({
+            text:  '← →  •  scroll',
+            style: 'font-size:10px;color:rgba(255,255,255,0.28);',
+        });
+        this._leftBox.add_child(this._navHint);
+
+        // Hotkey chip
+        const chip = new St.BoxLayout({
+            vertical: false,
+            style:    'padding:3px 6px;border-radius:6px;background-color:rgba(255,255,255,0.06);spacing:3px;',
+        });
+        chip.add_child(new St.Icon({ icon_name: 'input-keyboard-symbolic', icon_size: 11,
+            style: 'color:rgba(255,255,255,0.4);' }));
+        chip.add_child(new St.Label({ text: 'Super+Alt+W',
+            style: 'font-size:10px;color:rgba(255,255,255,0.4);' }));
+        this._leftBox.add_child(chip);
+
+        // ── right ─────────────────────────────────────────────────────────────
+        const right = new St.BoxLayout({ vertical: false, style: 'spacing:4px;' });
+        this.actor.add_child(right);
+
+        // Skip (auto-rotate only)
+        this._skipBtn = new St.Button({
+            label: 'Skip',
+            style: 'padding:3px 8px;border-radius:6px;background-color:rgba(255,255,255,0.12);font-size:11px;',
+        });
+        this._skipBtn.connect('clicked', () => this._onSkip?.());
+        right.add_child(this._skipBtn);
+
+        // Interval cycle button (auto-rotate only)
+        this._intervalBtn = new St.Button({
+            label: '',
+            style: 'padding:3px 6px;border-radius:6px;background-color:rgba(255,255,255,0.08);font-size:11px;',
+        });
+        this._intervalBtn.connect('clicked', () => {
+            const cur  = settings.get_int('rotate-interval');
+            const idx  = Math.max(0, INTERVAL_MINS.indexOf(cur));
+            settings.set_int('rotate-interval', INTERVAL_MINS[(idx + 1) % INTERVAL_MINS.length]);
+        });
+        right.add_child(this._intervalBtn);
+
+        // View toggle
+        this._viewBtn = new St.Button({
+            child:  new St.Icon({ icon_name: 'view-grid-symbolic', icon_size: 13 }),
+            style:  'padding:3px 6px;border-radius:6px;background-color:rgba(255,255,255,0.08);',
+        });
+        this._viewBtn.connect('clicked', () => onViewToggle());
+        right.add_child(this._viewBtn);
+
+        // Settings
+        const settBtn = new St.Button({
+            child:  new St.Icon({ icon_name: 'emblem-system-symbolic', icon_size: 13 }),
+            style:  'padding:3px 6px;border-radius:6px;background-color:rgba(255,255,255,0.08);',
+        });
+        settBtn.connect('clicked', () => onSettings());
+        right.add_child(settBtn);
+
+        // Auto-rotate shuffle toggle (keeps shuffle icon — distinct role from skip-forward)
+        this._shuffleBtn = new St.Button({
+            child:  new St.Icon({ icon_name: 'media-playlist-shuffle-symbolic', icon_size: 13 }),
+            style:  '',
+        });
+        this._shuffleBtn.connect('clicked', () => {
+            settings.set_boolean('auto-rotate', !settings.get_boolean('auto-rotate'));
+        });
+        right.add_child(this._shuffleBtn);
+
+        this._autoId     = settings.connect('changed::auto-rotate',     () => this.sync());
+        this._intervalId = settings.connect('changed::rotate-interval', () => this.sync());
+
+        this.setViewMode(viewMode);
+        this.sync();
+    }
+
+    setSkipCallback(cb) { this._onSkip = cb; }
+
+    setViewMode(mode) {
+        const icon = mode === 'grid' ? 'media-optical-symbolic' : 'view-grid-symbolic';
+        this._viewBtn.get_child().set_icon_name(icon);
+        // Show nav hint only in carousel — grid has its own hint row
+        this._navHint.visible = (mode === 'carousel');
+    }
+
+    sync() {
+        const on   = this._settings.get_boolean('auto-rotate');
+        const mins = this._settings.get_int('rotate-interval');
+        this._shuffleBtn.style = on
+            ? 'padding:3px 6px;border-radius:6px;background-color:rgba(255,255,255,0.18);color:#78d4f0;'
+            : 'padding:3px 6px;border-radius:6px;background-color:rgba(255,255,255,0.06);opacity:0.45;';
+        this._skipBtn.visible     = on;
+        this._intervalBtn.visible = on;
+        if (on) this._intervalBtn.set_label(`⏱ ${intervalLabel(mins)}`);
+    }
+
+    destroy() {
+        this._settings.disconnect(this._autoId);
+        this._settings.disconnect(this._intervalId);
+    }
+}
+
+// ─── GridView ─────────────────────────────────────────────────────────────────
+
+class GridView {
+    constructor(files, currentPath, onPreview, onConfirm, onRename) {
         this._files     = files;
-        this._index     = Math.max(0, files.indexOf(currentPath));
-        this._settings  = settings;
+        this._sel       = Math.max(0, files.indexOf(currentPath));
         this._onPreview = onPreview;
         this._onConfirm = onConfirm;
-        this._onSkip    = onSkip;
-        this._idleId    = null;
-        this._cards     = new Map();
+        this._onRename  = onRename;
         this._confirmed = false;
+        this._idleId    = null;
+        this._cache     = new Map();
 
-        // Total height: cards + button row + hint
+        const PER      = GRID_COLS * GRID_ROWS;
+        this._per      = PER;
+        this._pages    = Math.max(1, Math.ceil(files.length / PER));
+        this._page     = Math.floor(this._sel / PER);
+
         this.actor = new St.Widget({
-            style:     `width: ${POPUP_W}px; height: ${CARD_H + 86}px;`,
+            style:     `width:${CONTENT_W}px;height:${CONTENT_H}px;`,
             reactive:  true,
             can_focus: true,
         });
 
-        // ── card strip ────────────────────────────────────────────────────────
-        this._strip = new St.Widget({ style: `height: ${CARD_H + 16}px;` });
-        this._strip.set_clip(0, 0, POPUP_W, CARD_H + 16);
-        this.actor.add_child(this._strip);
+        this._grid = new St.Widget({ style: `width:${CONTENT_W}px;height:${CONTENT_H}px;` });
+        this.actor.add_child(this._grid);
 
-        // ── button row ────────────────────────────────────────────────────────
-        this._btnRow = new St.BoxLayout({
-            vertical: false,
-            style:    `width: ${POPUP_W - POPUP_PAD * 2}px; padding: 6px ${POPUP_PAD}px 0;`,
-        });
-        this._btnRow.set_position(0, CARD_H + 14);
-        this.actor.add_child(this._btnRow);
+        this._buildPage();
 
-        // Left side — Skip + interval (conditional)
-        this._leftBox = new St.BoxLayout({ vertical: false, style: 'spacing: 6px;', x_expand: true });
-        this._btnRow.add_child(this._leftBox);
-
-        // Right side — Settings + shuffle toggle
-        const rightBox = new St.BoxLayout({ vertical: false, style: 'spacing: 4px;' });
-        this._btnRow.add_child(rightBox);
-
-        // Settings icon button
-        const settingsBtn = new St.Button({
-            child: new St.Icon({ icon_name: 'emblem-system-symbolic', icon_size: 16 }),
-            style: 'padding: 4px 6px; border-radius: 6px; background-color: rgba(255,255,255,0.08);',
-        });
-        settingsBtn.connect('clicked', () => {
-            // Close carousel and open prefs — indicator handles openPreferences
-            this._onOpenSettings?.();
-        });
-        rightBox.add_child(settingsBtn);
-
-        // Shuffle toggle icon button
-        this._shuffleBtn = new St.Button({
-            child: new St.Icon({ icon_name: 'media-playlist-shuffle-symbolic', icon_size: 16 }),
-            style: '',
-        });
-        this._shuffleBtn.connect('clicked', () => {
-            const current = this._settings.get_boolean('auto-rotate');
-            this._settings.set_boolean('auto-rotate', !current);
-            this._syncAutoRotateUI();
-        });
-        rightBox.add_child(this._shuffleBtn);
-
-        // ── hint text ─────────────────────────────────────────────────────────
-        const hint = new St.Label({
-            text:  'scroll or ← →  •  R random  •  click to apply  •  Esc revert  •  ⌨ Super+Alt+W anytime',
-            style: `font-size: 10px; color: rgba(255,255,255,0.28); padding: 4px ${POPUP_PAD}px 0;`,
-        });
-        hint.set_position(0, CARD_H + 56);
-        this.actor.add_child(hint);
-
-        // Build initial state
-        this._buildVisibleCards();
-        this._syncAutoRotateUI();
-
-        // ── keyboard ─────────────────────────────────────────────────────────
-        this.actor.connect('key-press-event', (_a, event) => {
-            const sym = event.get_key_symbol();
-            if (sym === Clutter.KEY_Left  || sym === Clutter.KEY_h) { this.navigate(-1); return Clutter.EVENT_STOP; }
-            if (sym === Clutter.KEY_Right || sym === Clutter.KEY_j) { this.navigate(+1); return Clutter.EVENT_STOP; }
-            if (sym === Clutter.KEY_r     || sym === Clutter.KEY_R) { this.navigateRandom(); return Clutter.EVENT_STOP; }
+        // Keys: ← → single step, ↑ ↓ page jump
+        this.actor.connect('key-press-event', (_a, ev) => {
+            const sym = ev.get_key_symbol();
+            if (sym === Clutter.KEY_Left)  { this._step(-1);          return Clutter.EVENT_STOP; }
+            if (sym === Clutter.KEY_Right) { this._step(+1);          return Clutter.EVENT_STOP; }
+            if (sym === Clutter.KEY_Up)    { this._jumpPage(-1);      return Clutter.EVENT_STOP; }
+            if (sym === Clutter.KEY_Down)  { this._jumpPage(+1);      return Clutter.EVENT_STOP; }
             if (sym === Clutter.KEY_Return || sym === Clutter.KEY_KP_Enter) {
                 this._confirmed = true;
-                this._onConfirm(this._files[this._index]);
+                this._onConfirm(this._files[this._sel]);
                 return Clutter.EVENT_STOP;
             }
             return Clutter.EVENT_PROPAGATE;
         });
 
-        // ── scroll wheel ──────────────────────────────────────────────────────
-        this.actor.connect('scroll-event', (_a, event) => {
-            const dir = event.get_scroll_direction();
-            if (dir === Clutter.ScrollDirection.UP   || dir === Clutter.ScrollDirection.LEFT)  this.navigate(-1);
-            if (dir === Clutter.ScrollDirection.DOWN || dir === Clutter.ScrollDirection.RIGHT) this.navigate(+1);
+        // Scroll wheel = page jump
+        this.actor.connect('scroll-event', (_a, ev) => {
+            const dir = ev.get_scroll_direction();
+            if (dir === Clutter.ScrollDirection.DOWN) this._jumpPage(+1);
+            if (dir === Clutter.ScrollDirection.UP)   this._jumpPage(-1);
             return Clutter.EVENT_STOP;
         });
-
-        // Watch settings changes while carousel is open
-        this._settingsId = this._settings.connect('changed::auto-rotate', () => this._syncAutoRotateUI());
-        this._intervalId = this._settings.connect('changed::rotate-interval', () => this._syncIntervalCombo());
     }
 
-    // ── auto-rotate UI sync ───────────────────────────────────────────────────
+    _buildPage() {
+        this._grid.remove_all_children();
+        if (this._idleId !== null) { GLib.source_remove(this._idleId); this._idleId = null; }
 
-    _syncAutoRotateUI() {
-        const on = this._settings.get_boolean('auto-rotate');
+        const start   = this._page * this._per;
+        const end     = Math.min(start + this._per, this._files.length);
+        const pending = [];
 
-        // Shuffle button — bright accent when on, dim when off
-        this._shuffleBtn.style = on
-            ? 'padding: 4px 6px; border-radius: 6px; background-color: rgba(255,255,255,0.18); color: #78d4f0;'
-            : 'padding: 4px 6px; border-radius: 6px; background-color: rgba(255,255,255,0.06); opacity: 0.45;';
+        for (let i = start; i < end; i++) {
+            const pos = i - start;
+            const col = pos % GRID_COLS;
+            const row = Math.floor(pos / GRID_COLS);
+            const x   = col * (GRID_THUMB_W + GRID_GAP);
+            const y   = row * (GRID_THUMB_H + GRID_LABEL_H + GRID_GAP);
 
-        // Rebuild left box contents
-        this._leftBox.remove_all_children();
+            const cell = this._makeCell(i, x, y);
+            this._grid.add_child(cell);
 
-        if (on) {
-            // Skip button
-            const skipBtn = new St.Button({
-                label: 'Skip',
-                style: 'padding: 4px 14px; border-radius: 6px; background-color: rgba(255,255,255,0.12); font-size: 12px;',
-            });
-            skipBtn.connect('clicked', () => this._onSkip());
-            this._leftBox.add_child(skipBtn);
-
-            // Interval dropdown — built as a cycling button for simplicity in St
-            this._buildIntervalButton();
+            if (this._cache.has(this._files[i])) this._applyThumb(i);
+            else pending.push(i);
         }
-    }
 
-    _buildIntervalButton() {
-        const cur  = this._settings.get_int('rotate-interval');
-        const idx  = Math.max(0, INTERVAL_MINS.indexOf(cur));
-        const label = intervalLabel(INTERVAL_MINS[idx]);
-
-        this._intervalBtn = new St.Button({
-            label: `⏱ ${label}`,
-            style: 'padding: 4px 10px; border-radius: 6px; background-color: rgba(255,255,255,0.08); font-size: 11px;',
+        // Page counter + nav hint
+        // Hint + page counter on one line
+        const hintRow = new St.BoxLayout({
+            vertical: false,
+            style:    `width:${CONTENT_W}px; spacing:0px;`,
         });
-        this._intervalBtn.connect('clicked', () => {
-            const curMins  = this._settings.get_int('rotate-interval');
-            const curIdx   = Math.max(0, INTERVAL_MINS.indexOf(curMins));
-            const nextMins = INTERVAL_MINS[(curIdx + 1) % INTERVAL_MINS.length];
-            this._settings.set_int('rotate-interval', nextMins); // persists + fires changed signal
+        hintRow.set_position(0, GRID_H + 2);
+
+        const navHint = new St.Label({
+            text:    '← →  one by one   ↑ ↓  page',
+            style:   'font-size:10px;color:rgba(255,255,255,0.28);',
+            x_expand: true,
         });
-        this._leftBox.add_child(this._intervalBtn);
-    }
+        hintRow.add_child(navHint);
 
-    _syncIntervalCombo() {
-        if (!this._intervalBtn) return;
-        const cur = this._settings.get_int('rotate-interval');
-        this._intervalBtn.set_label(`⏱ ${intervalLabel(cur)}`);
-    }
-
-    // ── card window ───────────────────────────────────────────────────────────
-
-    _windowIndices() {
-        const n = this._files.length;
-        const indices = [];
-        for (let d = -(PEEK + 1); d <= (PEEK + 1); d++)
-            indices.push(((this._index + d) % n + n) % n);
-        return indices;
-    }
-
-    _buildVisibleCards() {
-        const visible = new Set(this._windowIndices());
-        for (const i of visible) { if (!this._cards.has(i)) this._makeCard(i); }
-        for (const [i, card] of this._cards) {
-            if (!visible.has(i)) { card.destroy(); this._cards.delete(i); }
-        }
-        this._layoutCards(false);
-        this._queueThumbnails([...visible]);
-    }
-
-    _makeCard(i) {
-        const card = new St.Button({
-            style: `
-                width: ${CARD_W}px; height: ${CARD_H}px;
-                border-radius: 8px; border: 2px solid transparent;
-                background-color: rgba(128,128,128,0.15);
-            `,
-            can_focus: false, clip_to_allocation: true,
+        const pip = new St.Label({
+            text:  this._pages > 1 ? `${this._page + 1} / ${this._pages}` : `1 / ${this._pages}`,
+            style: 'font-size:10px;color:rgba(255,255,255,0.3);',
         });
-        card._thumbLoaded = false;
-        card.connect('clicked', () => {
-            if (i === this._index) {
+        hintRow.add_child(pip);
+        this._grid.add_child(hintRow);
+
+        // Load thumbnails — selected card first
+        const queue = [this._sel, ...pending].filter((v, i, a) => a.indexOf(v) === i)
+            .filter(i => i >= start && i < end && !this._cache.has(this._files[i]));
+        this._loadQueue(queue);
+    }
+
+    _makeCell(i, x, y) {
+        const isSel = i === this._sel;
+        const cell  = new St.Widget({
+            style:    `width:${GRID_THUMB_W}px;height:${GRID_THUMB_H + GRID_LABEL_H}px;`,
+            reactive: true,
+        });
+        cell.set_position(x, y);
+
+        // Thumbnail button
+        const thumb = new St.Button({
+            style: isSel
+                ? `${thumbStyle(GRID_THUMB_W, GRID_THUMB_H, '')}border:2px solid rgba(255,255,255,0.75);border-radius:6px;background-color:rgba(128,128,128,0.2);`
+                : `width:${GRID_THUMB_W}px;height:${GRID_THUMB_H}px;border-radius:6px;border:2px solid transparent;background-color:rgba(128,128,128,0.2);`,
+            clip_to_allocation: true,
+        });
+        thumb._idx        = i;
+        thumb._thumbLoaded = false;
+        thumb.connect('clicked', () => {
+            if (i === this._sel) {
                 this._confirmed = true;
                 this._onConfirm(this._files[i]);
             } else {
-                this._index = i;
-                this._buildVisibleCards();
+                this._sel  = i;
+                this._page = Math.floor(i / this._per);
+                this._buildPage();
                 this._onPreview(this._files[i]);
             }
         });
-        this._strip.add_child(card);
-        this._cards.set(i, card);
-        return card;
+        cell.add_child(thumb);
+        cell._thumb = thumb;
+
+        // Clickable label for rename
+        const labelBtn = new St.Button({
+            style: `width:${GRID_THUMB_W}px;height:${GRID_LABEL_H - 2}px;`,
+        });
+        labelBtn.set_child(new St.Label({
+            text:  baseName(this._files[i]),
+            style: `font-size:10px;color:rgba(255,255,255,0.65);text-align:center;width:${GRID_THUMB_W}px;`,
+        }));
+        labelBtn.set_position(0, GRID_THUMB_H + 2);
+        labelBtn.connect('clicked', () => {
+            startRename(cell, labelBtn, baseName(this._files[i]),
+                0, GRID_THUMB_H + 2, GRID_THUMB_W, GRID_LABEL_H - 2,
+                (newName) => {
+                    const newPath = renameFile(this._files[i], newName);
+                    if (newPath) {
+                        this._files[i] = newPath;
+                        labelBtn.get_child().set_text(newName);
+                        this._onRename(i, newPath);
+                    }
+                }
+            );
+        });
+        cell.add_child(labelBtn);
+        cell._labelBtn = labelBtn;
+
+        return cell;
     }
 
-    _offsetOf(i) {
-        const n = this._files.length;
-        let offset = i - this._index;
-        if (offset >  n / 2) offset -= n;
-        if (offset < -n / 2) offset += n;
-        return offset;
-    }
-
-    _layoutCards(animate) {
-        const vcx = (POPUP_W - POPUP_PAD * 2) / 2;
-        for (const [i, card] of this._cards) {
-            const offset  = this._offsetOf(i);
-            const isFocus = offset === 0;
-            const targetW = isFocus ? CARD_W : SIDE_W;
-            const targetH = isFocus ? CARD_H : SIDE_H;
-            const alpha   = Math.max(0, 1 - Math.abs(offset) * 0.4);
-            const x       = POPUP_PAD + vcx - CARD_W / 2 + offset * (SIDE_W + GAP);
-            const y       = (CARD_H - targetH) / 2;
-            const border  = isFocus ? '2px solid rgba(255,255,255,0.6)' : '2px solid transparent';
-
-            card.style = card._thumbLoaded
-                ? `${makeThumbStyle(targetW, targetH, this._files[i])} border: ${border}; opacity: ${alpha};`
-                : `width: ${targetW}px; height: ${targetH}px; border-radius: 8px; border: ${border}; opacity: ${alpha}; background-color: rgba(128,128,128,0.15);`;
-
-            if (animate) card.ease({ x, y, duration: 180, mode: Clutter.AnimationMode.EASE_OUT_QUAD });
-            else         card.set_position(x, y);
-        }
-    }
-
-    _queueThumbnails(indices) {
-        if (this._idleId !== null) { GLib.source_remove(this._idleId); this._idleId = null; }
-        const queue   = [...indices].sort((a, b) => Math.abs(this._offsetOf(a)) - Math.abs(this._offsetOf(b)));
-        const pending = queue.filter(i => this._cards.has(i) && !this._cards.get(i)._thumbLoaded);
-        if (pending.length === 0) return;
-        const processNext = () => {
+    _loadQueue(queue) {
+        if (queue.length === 0) return;
+        const next = () => {
             this._idleId = null;
-            const i = pending.shift();
+            const i = queue.shift();
             if (i !== undefined) {
+                this._cache.set(this._files[i], true);
                 this._applyThumb(i);
-                if (pending.length > 0) this._idleId = GLib.idle_add(GLib.PRIORITY_LOW, processNext);
+                if (queue.length > 0)
+                    this._idleId = GLib.idle_add(GLib.PRIORITY_LOW, next);
             }
             return GLib.SOURCE_REMOVE;
         };
-        this._idleId = GLib.idle_add(GLib.PRIORITY_LOW, processNext);
+        this._idleId = GLib.idle_add(GLib.PRIORITY_LOW, next);
     }
 
     _applyThumb(i) {
-        const card = this._cards.get(i);
-        if (!card || card._thumbLoaded) return;
-        const offset  = this._offsetOf(i);
-        const isFocus = offset === 0;
-        const targetW = isFocus ? CARD_W : SIDE_W;
-        const targetH = isFocus ? CARD_H : SIDE_H;
-        const alpha   = Math.max(0, 1 - Math.abs(offset) * 0.4);
-        const border  = isFocus ? '2px solid rgba(255,255,255,0.6)' : '2px solid transparent';
-        card.style = `${makeThumbStyle(targetW, targetH, this._files[i])} border: ${border}; opacity: ${alpha};`;
-        card._thumbLoaded = true;
+        const start = this._page * this._per;
+        const pos   = i - start;
+        if (pos < 0 || pos >= this._per) return;
+        const children = this._grid.get_children();
+        const cell     = children[pos];
+        if (!cell || !cell._thumb || cell._thumb._thumbLoaded) return;
+        const isSel  = i === this._sel;
+        const border = isSel ? '2px solid rgba(255,255,255,0.75)' : '2px solid transparent';
+        cell._thumb.style = `${thumbStyle(GRID_THUMB_W, GRID_THUMB_H, this._files[i])}border:${border};border-radius:6px;`;
+        cell._thumb._thumbLoaded = true;
     }
 
-    // ── public ────────────────────────────────────────────────────────────────
-
-    navigate(delta) {
-        const n    = this._files.length;
-        const next = ((this._index + delta) % n + n) % n;
-        if (next === this._index) return;
-        this._index = next;
-        this._buildVisibleCards();
+    _step(delta) {
+        const next = Math.max(0, Math.min(this._files.length - 1, this._sel + delta));
+        if (next === this._sel) return;
+        this._sel  = next;
+        this._page = Math.floor(next / this._per);
+        this._buildPage();
         this._onPreview(this._files[next]);
     }
 
-    navigateRandom() {
-        if (this._files.length <= 1) return;
-        const n = this._files.length;
+    _jumpPage(delta) {
+        const next = Math.max(0, Math.min(this._pages - 1, this._page + delta));
+        if (next === this._page) return;
+        this._page = next;
+        // Move selection to first item of new page
+        this._sel = this._page * this._per;
+        this._buildPage();
+        this._onPreview(this._files[this._sel]);
+    }
+
+    navigateRandom(files) {
         let next;
-        do { next = Math.floor(Math.random() * n); } while (next === this._index);
-        this._index = next;
-        this._buildVisibleCards();
-        this._onPreview(this._files[next]);
+        do { next = Math.floor(Math.random() * files.length); } while (next === this._sel && files.length > 1);
+        this._sel  = next;
+        this._page = Math.floor(next / this._per);
+        this._buildPage();
+        this._onPreview(files[next]);
     }
 
     jumpTo(path) {
         const i = this._files.indexOf(path);
-        if (i === -1 || i === this._index) return;
-        this._index = i;
-        this._buildVisibleCards();
+        if (i === -1) return;
+        this._sel  = i;
+        this._page = Math.floor(i / this._per);
+        this._buildPage();
     }
-
-    setOpenSettingsCallback(cb) { this._onOpenSettings = cb; }
 
     wasConfirmed() { return this._confirmed; }
 
     destroy() {
-        if (this._idleId    !== null) { GLib.source_remove(this._idleId); this._idleId = null; }
-        if (this._settingsId !== null) { this._settings.disconnect(this._settingsId); this._settingsId = null; }
-        if (this._intervalId !== null) { this._settings.disconnect(this._intervalId); this._intervalId = null; }
-        this._cards.clear();
+        if (this._idleId !== null) { GLib.source_remove(this._idleId); this._idleId = null; }
+        this._cache.clear();
     }
+}
+
+// ─── CarouselView ─────────────────────────────────────────────────────────────
+
+class CarouselView {
+    constructor(files, currentPath, onPreview, onConfirm, onRename) {
+        this._files     = files;
+        this._idx       = Math.max(0, files.indexOf(currentPath));
+        this._onPreview = onPreview;
+        this._onConfirm = onConfirm;
+        this._onRename  = onRename;
+        this._confirmed = false;
+
+        this.actor = new St.Widget({
+            style:     `width:${CONTENT_W}px;height:${CONTENT_H}px;`,
+            reactive:  true,
+            can_focus: true,
+        });
+
+        // Large thumbnail
+        this._thumb = new St.Button({
+            style:              `width:${CAR_W}px;height:${CAR_H}px;border-radius:8px;border:2px solid rgba(255,255,255,0.5);background-color:rgba(128,128,128,0.2);`,
+            clip_to_allocation: true,
+        });
+        this._thumb.set_position(0, 0);
+        this._thumb.connect('clicked', () => {
+            this._confirmed = true;
+            this._onConfirm(this._files[this._idx]);
+        });
+        this.actor.add_child(this._thumb);
+
+        // Counter
+        this._counter = new St.Label({
+            text:  '',
+            style: 'font-size:10px;color:rgba(255,255,255,0.35);',
+        });
+        this._counter.set_position(CAR_W - 50, CAR_H - 18);
+        this.actor.add_child(this._counter);
+
+        // Filename label button
+        this._labelBtn = new St.Button({
+            style: `width:${CAR_W}px;height:${CAR_LABEL_H}px;`,
+        });
+        this._labelBtn.set_child(new St.Label({
+            text:  '',
+            style: `font-size:12px;color:rgba(255,255,255,0.7);text-align:center;width:${CAR_W}px;`,
+        }));
+        this._labelBtn.set_position(0, CAR_H + 4);
+        this._labelBtn.connect('clicked', () => {
+            startRename(this.actor, this._labelBtn, baseName(this._files[this._idx]),
+                0, CAR_H + 4, CAR_W, CAR_LABEL_H,
+                (newName) => {
+                    const newPath = renameFile(this._files[this._idx], newName);
+                    if (newPath) {
+                        this._files[this._idx] = newPath;
+                        this._labelBtn.get_child().set_text(newName);
+                        this._onRename(this._idx, newPath);
+                    }
+                }
+            );
+        });
+        this.actor.add_child(this._labelBtn);
+
+        // Nav hint is shown in the BottomBar for carousel mode
+
+        this._update();
+
+        // Keys
+        this.actor.connect('key-press-event', (_a, ev) => {
+            const sym = ev.get_key_symbol();
+            if (sym === Clutter.KEY_Left  || sym === Clutter.KEY_h) { this.navigate(-1); return Clutter.EVENT_STOP; }
+            if (sym === Clutter.KEY_Right || sym === Clutter.KEY_j) { this.navigate(+1); return Clutter.EVENT_STOP; }
+            if (sym === Clutter.KEY_Return || sym === Clutter.KEY_KP_Enter) {
+                this._confirmed = true;
+                this._onConfirm(this._files[this._idx]);
+                return Clutter.EVENT_STOP;
+            }
+            return Clutter.EVENT_PROPAGATE;
+        });
+
+        this.actor.connect('scroll-event', (_a, ev) => {
+            const dir = ev.get_scroll_direction();
+            if (dir === Clutter.ScrollDirection.UP   || dir === Clutter.ScrollDirection.LEFT)  this.navigate(-1);
+            if (dir === Clutter.ScrollDirection.DOWN || dir === Clutter.ScrollDirection.RIGHT) this.navigate(+1);
+            return Clutter.EVENT_STOP;
+        });
+    }
+
+    _update() {
+        const path = this._files[this._idx];
+        if (!path) return;
+        this._thumb.style = `${thumbStyle(CAR_W, CAR_H, path)}border:2px solid rgba(255,255,255,0.5);border-radius:8px;`;
+        this._labelBtn.get_child().set_text(baseName(path));
+        this._counter.set_text(`${this._idx + 1} / ${this._files.length}`);
+    }
+
+    navigate(delta) {
+        const n    = this._files.length;
+        const next = ((this._idx + delta) % n + n) % n;
+        if (next === this._idx) return;
+        this._idx  = next;
+        this._update();
+        this._onPreview(this._files[next]);
+    }
+
+    navigateRandom(files) {
+        let next;
+        do { next = Math.floor(Math.random() * files.length); } while (next === this._idx && files.length > 1);
+        this._idx = next;
+        this._update();
+        this._onPreview(files[next]);
+    }
+
+    jumpTo(path) {
+        const i = this._files.indexOf(path);
+        if (i === -1 || i === this._idx) return;
+        this._idx = i;
+        this._update();
+    }
+
+    wasConfirmed() { return this._confirmed; }
+    destroy() {}
 }
 
 // ─── WallpaperSwitcherIndicator ───────────────────────────────────────────────
@@ -401,7 +633,8 @@ class WallpaperSwitcherIndicator extends PanelMenu.Button {
         this._ext         = extension;
         this._settings    = extension.getSettings(SCHEMA_ID);
         this._bgSettings  = new Gio.Settings({ schema_id: BG_SCHEMA });
-        this._carousel    = null;
+        this._view        = null;
+        this._bar         = null;
         this._prevPath    = null;
         this._monitor     = null;
         this._rotateTimer = null;
@@ -412,22 +645,25 @@ class WallpaperSwitcherIndicator extends PanelMenu.Button {
             style_class: 'system-status-icon',
         }));
 
-        this._popupBox = new St.BoxLayout({ vertical: true, style: 'padding: 8px 0;' });
+        // Let the theme provide outer padding; we size content to fit inside it
+        // Let GNOME size the popup naturally based on content
+
+        this._popupBox = new St.BoxLayout({
+            vertical: true,
+            style:    `width:${CONTENT_W}px; padding:${POPUP_PAD}px;`,
+        });
         this.menu.box.add_child(this._popupBox);
 
         this._emptyLabel = new St.Label({
             text:  'No folder set — right-click for Settings',
-            style: 'padding: 12px 16px; color: rgba(255,255,255,0.5);',
+            style: 'padding:12px 16px;color:rgba(255,255,255,0.5);',
         });
 
         // Right-click → settings
-        this.connect('button-press-event', (_actor, event) => {
-            if (event.get_button() === Clutter.BUTTON_SECONDARY) {
+        this.connect('button-press-event', (_a, ev) => {
+            if (ev.get_button() === Clutter.BUTTON_SECONDARY) {
                 this.menu.close();
-                GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
-                    extension.openPreferences();
-                    return GLib.SOURCE_REMOVE;
-                });
+                GLib.idle_add(GLib.PRIORITY_DEFAULT, () => { extension.openPreferences(); return GLib.SOURCE_REMOVE; });
                 return Clutter.EVENT_STOP;
             }
             return Clutter.EVENT_PROPAGATE;
@@ -452,6 +688,11 @@ class WallpaperSwitcherIndicator extends PanelMenu.Button {
         try { return GLib.filename_from_uri(uri)[0]; } catch (_) { return null; }
     }
 
+    forcePopupWidth() {
+        // Set width on the menu actor itself — most reliable approach
+        this.menu.actor.style = `width:${POPUP_W}px;`;
+    }
+
     _getFiles() {
         return listImages(
             this._settings.get_string('wallpaper-folder'),
@@ -459,56 +700,58 @@ class WallpaperSwitcherIndicator extends PanelMenu.Button {
         );
     }
 
-    // ── open / close ──────────────────────────────────────────────────────────
-
     _onOpen() {
         this._scaling  = this._settings.get_string('picture-options');
         this._prevPath = this._currentWallpaper();
-
-        if (this._carousel) { this._carousel.destroy(); this._carousel = null; }
+        this._destroyContents();
         this._popupBox.remove_all_children();
 
         const files = this._getFiles();
-        if (files.length === 0) {
-            this._popupBox.add_child(this._emptyLabel);
-            return;
-        }
+        if (files.length === 0) { this._popupBox.add_child(this._emptyLabel); return; }
+        this._build(files);
+    }
 
-        this._carousel = new CardCarousel(
-            files,
-            this._prevPath,
+    _build(files) {
+        const mode      = this._settings.get_string('view-mode') ?? 'grid';
+        const onPreview = (p) => setWallpaper(p, this._scaling);
+        const onConfirm = (p) => { setWallpaper(p, this._scaling); this.menu.close(); };
+        const onRename  = () => {};
+
+        this._view = mode === 'grid'
+            ? new GridView(files, this._prevPath, onPreview, onConfirm, onRename)
+            : new CarouselView(files, this._prevPath, onPreview, onConfirm, onRename);
+
+        this._bar = new BottomBar(
             this._settings,
-            (path) => setWallpaper(path, this._scaling),
-            (path) => { setWallpaper(path, this._scaling); this.menu.close(); },
+            mode,
+            () => this._view?.navigateRandom(files),
+            () => { this.menu.close(); GLib.idle_add(GLib.PRIORITY_DEFAULT, () => { this._ext.openPreferences(); return GLib.SOURCE_REMOVE; }); },
             () => {
-                const next = randomOther(this._getFiles(), this._currentWallpaper());
-                if (next) {
-                    setWallpaper(next, this._scaling);
-                    this._carousel?.jumpTo(next);
-                    this._restartRotateTimer();
-                }
+                const next = (this._settings.get_string('view-mode') ?? 'grid') === 'grid' ? 'carousel' : 'grid';
+                this._settings.set_string('view-mode', next);
+                const cur = this._currentWallpaper();
+                this._destroyContents();
+                this._popupBox.remove_all_children();
+                this._build(this._getFiles());
             }
         );
 
-        this._carousel.setOpenSettingsCallback(() => {
-            this.menu.close();
-            GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
-                this._ext.openPreferences();
-                return GLib.SOURCE_REMOVE;
-            });
+        this._bar.setSkipCallback(() => {
+            const next = randomOther(this._getFiles(), this._currentWallpaper());
+            if (next) { setWallpaper(next, this._scaling); this._view?.jumpTo(next); this._restartRotateTimer(); }
         });
 
-        this._popupBox.add_child(this._carousel.actor);
+        this._popupBox.add_child(this._view.actor);
+        this._popupBox.add_child(this._bar.actor);
 
         GLib.timeout_add(GLib.PRIORITY_DEFAULT, 50, () => {
-            this._carousel?.actor.grab_key_focus();
+            this._view?.actor.grab_key_focus();
             return GLib.SOURCE_REMOVE;
         });
 
-        // Escape — revert and close
-        this._escId = this._carousel.actor.connect('key-press-event', (_a, ev) => {
+        this._escId = this._view.actor.connect('key-press-event', (_a, ev) => {
             if (ev.get_key_symbol() === Clutter.KEY_Escape) {
-                this._carousel._confirmed = true;
+                this._view._confirmed = true;
                 if (this._prevPath) setWallpaper(this._prevPath, this._scaling);
                 this.menu.close();
                 return Clutter.EVENT_STOP;
@@ -518,23 +761,31 @@ class WallpaperSwitcherIndicator extends PanelMenu.Button {
     }
 
     _onClose() {
-        if (this._carousel) {
-            if (this._prevPath && !this._carousel.wasConfirmed())
-                setWallpaper(this._prevPath, this._scaling);
-            this._carousel.destroy();
-            this._carousel = null;
-            this._escId    = null;
-        }
+        if (this._view && this._prevPath && !this._view.wasConfirmed())
+            setWallpaper(this._prevPath, this._scaling);
+        this._destroyContents();
     }
 
-    // ── auto-rotate timer ─────────────────────────────────────────────────────
+    _destroyContents() {
+        this._view?.destroy(); this._view = null;
+        this._bar?.destroy();  this._bar  = null;
+        this._escId = null;
+    }
+
+    _applyRandomHotkey() {
+        const files = this._getFiles();
+        if (!files.length) return;
+        const next = randomOther(files, this._currentWallpaper());
+        if (!next) return;
+        setWallpaper(next, this._settings.get_string('picture-options'));
+        if (this._view && this.menu.isOpen) this._view.jumpTo(next);
+    }
 
     _startRotateTimer() {
         if (!this._settings.get_boolean('auto-rotate')) return;
         const secs = this._settings.get_int('rotate-interval') * 60;
         this._rotateTimer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, secs, () => {
-            this._rotateTick();
-            return GLib.SOURCE_CONTINUE;
+            this._rotateTick(); return GLib.SOURCE_CONTINUE;
         });
     }
 
@@ -545,29 +796,12 @@ class WallpaperSwitcherIndicator extends PanelMenu.Button {
 
     _rotateTick() {
         const files = this._getFiles();
-        if (files.length === 0) return;
+        if (!files.length) return;
         const next = randomOther(files, this._currentWallpaper());
         if (!next) return;
         setWallpaper(next, this._settings.get_string('picture-options'));
-        if (this._carousel && this.menu.isOpen)
-            this._carousel.jumpTo(next);
+        if (this._view && this.menu.isOpen) this._view.jumpTo(next);
     }
-
-    // ── random hotkey handler ─────────────────────────────────────────────────
-
-    _applyRandomHotkey() {
-        const files = this._getFiles();
-        if (files.length === 0) return;
-        const scaling = this._settings.get_string('picture-options');
-        const next    = randomOther(files, this._currentWallpaper());
-        if (!next) return;
-        setWallpaper(next, scaling);
-        // If carousel is open, jump it to the new wallpaper too
-        if (this._carousel && this.menu.isOpen)
-            this._carousel.jumpTo(next);
-    }
-
-    // ── file monitor ──────────────────────────────────────────────────────────
 
     _watchFolder() {
         if (this._monitor) { this._monitor.cancel(); this._monitor = null; }
@@ -579,10 +813,7 @@ class WallpaperSwitcherIndicator extends PanelMenu.Button {
             this._monitor.connect('changed', () => {
                 if (this.menu.isOpen) {
                     this.menu.close();
-                    GLib.timeout_add(GLib.PRIORITY_DEFAULT, 150, () => {
-                        this.menu.open();
-                        return GLib.SOURCE_REMOVE;
-                    });
+                    GLib.timeout_add(GLib.PRIORITY_DEFAULT, 150, () => { this.menu.open(); return GLib.SOURCE_REMOVE; });
                 }
             });
         } catch (_) {}
@@ -590,8 +821,8 @@ class WallpaperSwitcherIndicator extends PanelMenu.Button {
 
     destroy() {
         if (this._rotateTimer !== null) { GLib.source_remove(this._rotateTimer); this._rotateTimer = null; }
-        if (this._monitor)              { this._monitor.cancel(); this._monitor = null; }
-        if (this._carousel)             { this._carousel.destroy(); this._carousel = null; }
+        if (this._monitor) { this._monitor.cancel(); this._monitor = null; }
+        this._destroyContents();
         super.destroy();
     }
 });
@@ -605,13 +836,8 @@ export default class WallpaperSwitcherExtension extends Extension {
         Main.panel.addToStatusArea('wallpaper-switcher', this._indicator, 0,
             this._settings.get_string('panel-position'));
         this._posChangedId = this._settings.connect('changed::panel-position', () => this._reposition());
-        this._bindHotkey();
-    }
-
-    _bindHotkey() {
         Main.wm.addKeybinding(
-            'random-hotkey',
-            this._settings,
+            'random-hotkey', this._settings,
             Meta.KeyBindingFlags.IGNORE_AUTOREPEAT,
             Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW,
             () => this._indicator?._applyRandomHotkey()

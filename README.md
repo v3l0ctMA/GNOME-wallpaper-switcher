@@ -1,6 +1,6 @@
 # Wallpaper Switcher — GNOME Shell Extension
 
-A panel extension for GNOME that lets you browse and apply wallpapers from a folder of your choosing, with a live-preview card carousel, optional random auto-rotate timer, and a global hotkey for instant random wallpaper switching.
+A panel extension for GNOME that lets you browse and apply wallpapers from a folder of your choosing. Features a live-preview grid or carousel view, auto-rotate timer, and a global hotkey for instant random wallpaper switching.
 
 Tested on **GNOME 50** (Solus Linux). Should work on GNOME 45 and later.
 
@@ -8,17 +8,22 @@ Tested on **GNOME 50** (Solus Linux). Should work on GNOME 45 and later.
 
 ## Features
 
-- **Live carousel** — scroll through wallpaper thumbnails in a panel popup; the desktop updates in real time as you browse
-- **Wrap-around** — scrolling past the last image loops back to the first, so you can scroll in one direction indefinitely
-- **R for random** — press R in the carousel to jump to a random wallpaper instantly
-- **Global hotkey** — press `Super+Alt+W` anywhere on the desktop to apply a random wallpaper instantly, no carousel needed
-- **Auto-rotate** — toggle random auto-rotate on/off directly in the carousel via the shuffle icon; interval is also adjustable inline
-- **Skip button** — appears when auto-rotate is on; picks a new random wallpaper and resets the timer
-- **Subfolder support** — optionally scan subfolders of your chosen folder recursively
+- **Grid view** — 3×3 thumbnail grid with filenames, browse page by page
+- **Carousel view** — single large image, scroll through one at a time
+- **View toggle** — switch between grid and carousel on the fly, preference persists
+- **Live preview** — desktop wallpaper updates in real time as you browse
+- **Filenames** — shown under each thumbnail in both views
+- **Rename** — click any filename to rename it inline; saves to disk immediately
+- **Wrap-around** — carousel scrolls infinitely in either direction
+- **R for random** — press R in carousel view to jump to a random wallpaper
+- **Global hotkey** — press `Super+Alt+W` anywhere to apply a random wallpaper instantly
+- **Auto-rotate** — randomly changes wallpaper on a timer, toggle and interval adjustable inline
+- **Skip button** — appears when auto-rotate is on; picks a new random and resets the timer
+- **Subfolder support** — optionally scan subfolders recursively
 - **File monitoring** — new images added to or removed from the folder are picked up automatically
 - **Scaling modes** — zoom, scaled, stretched, centered, or tiled
-- **Panel position** — place the icon in the left, center, or right section of the top bar
-- **Right-click** the panel icon at any time to open Settings
+- **Panel position** — left, center, or right section of the top bar
+- **Right-click** the panel icon to open Settings directly
 
 ---
 
@@ -65,32 +70,54 @@ On X11 you can instead press `Alt+F2`, type `r`, and press Enter to restart the 
 1. **Right-click** the wallpaper icon in the panel to open **Settings**
 2. Under **Wallpaper folder**, click **Choose…** and select the folder containing your images
 3. Adjust any other settings to your preference
-4. Click the panel icon — your wallpapers appear in the carousel immediately
+4. Click the panel icon — your wallpapers appear immediately
 
 ---
 
-## Using the carousel
+## Grid view
+
+The default view shows a 3×3 grid of thumbnails with filenames underneath.
 
 | Action | Result |
 |--------|--------|
-| Scroll wheel or ← → arrow keys | Browse wallpapers (desktop updates live) |
-| Click a side card | Move it to the center |
-| Click the center card or Enter | Apply the wallpaper and close |
-| **R** | Jump to a random wallpaper |
-| **Esc** | Revert to the wallpaper set before opening and close |
-| **Super+Alt+W** | Apply a random wallpaper instantly (works anywhere, carousel stays closed) |
-| **Right-click** the panel icon | Open Settings directly |
+| ← → arrow keys | Move selection one image at a time |
+| ↑ ↓ arrow keys | Jump a full page up or down |
+| Scroll wheel | Jump a full page up or down |
+| Click any thumbnail | Select it and live preview on desktop |
+| Click selected thumbnail or Enter | Apply wallpaper and close |
+| Click a filename | Rename it inline (Enter to confirm, Esc to cancel) |
+| **Esc** | Revert to wallpaper set before opening and close |
 
-### Button row (bottom of carousel)
+---
+
+## Carousel view
+
+Shows one large image at a time with the filename and position counter below.
+
+| Action | Result |
+|--------|--------|
+| ← → arrow keys or scroll wheel | Browse one image at a time (wraps around) |
+| Click image or Enter | Apply wallpaper and close |
+| Click filename | Rename it inline (Enter to confirm, Esc to cancel) |
+| **Esc** | Revert to wallpaper set before opening and close |
+
+---
+
+## Bottom bar
+
+Both views share the same bottom bar:
 
 ```
-[ Skip ]  [ ⏱ 10 min ]               [ ⚙ ]  [ 🔀 ]
+[ ▶▶ ]  [ ⌨ Super+Alt+W ]      [ Skip ] [ ⏱ 10 min ] [ ⊞ ] [ ⚙ ] [ 🔀 ]
 ```
 
 | Button | Description |
 |--------|-------------|
-| **Skip** | Pick a new random wallpaper and reset the timer (auto-rotate on only) |
+| **▶▶** | Apply a random wallpaper instantly (one-shot, no timer) |
+| **⌨ Super+Alt+W** | Reminder of the global hotkey |
+| **Skip** | New random wallpaper + reset timer (auto-rotate on only) |
 | **⏱ N min** | Cycle through intervals: 1 / 5 / 10 / 15 / 30 / 60 min — saves immediately (auto-rotate on only) |
+| **⊞ / ▤** | Toggle between grid and carousel view — saves preference |
 | **⚙** | Open Settings |
 | **🔀** | Toggle auto-rotate on/off — glows bright when on, faded when off — saves immediately |
 
@@ -98,13 +125,13 @@ On X11 you can instead press `Alt+F2`, type `r`, and press Enter to restart the 
 
 ## Global hotkey
 
-Press **`Super+Alt+W`** at any time — on the desktop, inside an app, anywhere — to instantly apply a random wallpaper from your folder. No carousel opens, no popup appears, the wallpaper just silently changes. Independent of the auto-rotate timer.
+Press **`Super+Alt+W`** at any time — on the desktop, inside an app, anywhere — to instantly apply a random wallpaper. No popup opens. Independent of the auto-rotate timer.
 
 ---
 
 ## Auto-rotate
 
-When enabled the wallpaper changes randomly at the chosen interval in the background. Toggle it and adjust the interval directly in the carousel without opening settings.
+When enabled the wallpaper changes randomly at the chosen interval in the background. Toggle and interval are both adjustable directly in the bottom bar without opening settings. When auto-rotate is on, a **Skip** button appears to immediately jump to a new random wallpaper and reset the countdown.
 
 ---
 
@@ -120,13 +147,13 @@ When enabled the wallpaper changes randomly at the chosen interval in the backgr
 | Setting | Options | Description |
 |---------|---------|-------------|
 | Panel position | Left, Center, Right | Where the icon appears in the top bar |
-| Wallpaper scaling | Zoom, Scaled, Stretched, Centered, Tiled | How the image fits the screen |
+| Wallpaper scaling | Zoom, Scaled, Stretched, Centered, Tiled | How the image fits the screen. **Zoom** (default) fills and crops; **Scaled** fits with letterboxing |
 
 ### Auto-rotate
 | Setting | Description |
 |---------|-------------|
-| Enable auto-rotate | Also controllable directly from the carousel shuffle icon |
-| Interval | 1, 5, 10, 15, 30, or 60 min — also adjustable from the carousel |
+| Enable auto-rotate | Also toggled directly from the bottom bar shuffle icon |
+| Interval | 1, 5, 10, 15, 30, or 60 min — also adjustable from the bottom bar |
 
 ### Keyboard shortcut
 | Shortcut | Action |
@@ -162,13 +189,19 @@ gnome-extensions disable wallpaper-switcher@local
 
 ---
 
+## Budgie version
+
+Not currently available. If there's enough interest from Budgie users, open an issue and let me know — demand will determine whether it's worth the effort.
+
+---
+
 ## Troubleshooting
 
 **Extension shows as errored**
 Check the logs: `journalctl -f /usr/bin/gnome-shell`
 
 **Hotkey not working**
-Make sure no other application or extension has claimed `Super+Alt+W`. Check System Settings → Keyboard → Keyboard Shortcuts.
+Check System Settings → Keyboard → Keyboard Shortcuts for conflicts with `Super+Alt+W`.
 
 **Thumbnails not appearing**
 Files load lazily so there may be a brief moment with grey placeholders on first open.

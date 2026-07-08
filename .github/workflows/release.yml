@@ -1,12 +1,10 @@
 name: Release
 
+# Runs automatically when you push a version tag like v1.0, v1.1, etc.
 on:
   push:
     tags:
       - 'v*'
-
-permissions:
-  contents: write
 
 jobs:
   build:
@@ -23,9 +21,26 @@ jobs:
         run: glib-compile-schemas schemas/
 
       - name: Build zip
-        run: zip -r wallpaper-switcher.zip metadata.json extension.js prefs.js schemas/ README.md Makefile
+        run: |
+          mkdir -p dist
+          zip -r dist/wallpaper-switcher.zip \
+            metadata.json \
+            extension.js \
+            prefs.js \
+            schemas/ \
+            README.md \
+            Makefile
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: wallpaper-switcher.zip
+          files: dist/wallpaper-switcher.zip
+          body: |
+            ## Installation
+
+            1. Download `wallpaper-switcher.zip` below
+            2. Unzip and run `make install` in the folder
+            3. Run `gnome-extensions enable wallpaper-switcher@local`
+            4. Log out and back in (Wayland) or `Alt+F2` → `r` (X11)
+
+            See README.md for full instructions.

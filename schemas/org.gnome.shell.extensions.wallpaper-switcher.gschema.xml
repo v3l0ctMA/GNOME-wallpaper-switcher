@@ -46,5 +46,12 @@
       <description>Global hotkey to apply a random wallpaper instantly without opening the carousel.</description>
     </key>
 
+
+    <key name="view-mode" type="s">
+      <default>'grid'</default>
+      <summary>View mode</summary>
+      <description>grid or carousel</description>
+    </key>
+
   </schema>
 </schemalist>
